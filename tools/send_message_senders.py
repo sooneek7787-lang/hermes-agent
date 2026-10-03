@@ -256,8 +256,32 @@ def _telegram_format(message):
         return message, ParseMode.MARKDOWN_V2, False  # formatting unavailable: send as-is
 
 
-async def _send_telegram(token, chat_id, message, media_files=None, thread_id=None, disable_link_previews=False, force_document=False):
-    """One-shot Telegram Bot API send; parse failures fall back to plain text."""
+def _standalone_notifications_mode() -> str:
+    """Notification mode (all/important) for standalone sends — same contract as the
+    gateway adapter's ``_resolve_notifications_mode`` (#131924): env override, then
+    ``display.platforms.telegram.notifications`` in config, else ``important``."""
+    mode = os.getenv("HERMES_TELEGRAM_NOTIFICATIONS", "")
+    if not mode:
+        try:
+            from hermes_cli.config import cfg_get, load_config
+            _raw = cfg_get(load_config(), "display", "platforms", "telegram", "notifications")
+            if _raw not in {None, ""}:
+                mode = str(_raw).strip().lower()
+        except Exception:
+            pass
+    mode = mode or "important"
+    if mode not in {"all", "important"}:
+        mode = "important"
+    return mode
+
+
+async def _send_telegram(token, chat_id, message, media_files=None, thread_id=None, disable_link_previews=False, force_document=False, notify=None):
+    """One-shot Telegram Bot API send; parse failures fall back to plain text.
+
+    ``notify`` (tri-state) honours ``display.platforms.telegram.notifications`` for
+    standalone sends the way the gateway adapter does (#131924): in ``important`` mode
+    a non-final message is delivered silently unless ``notify=True``.
+    """
     try:
         formatted, send_parse_mode, _has_html = _telegram_format(message)
         bot = _telegram_bot(token)
@@ -268,6 +292,10 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
         int_chat_id = normalize_telegram_chat_id(chat_id)
         media_files = media_files or []
         thread_kwargs = _telegram_thread_kwargs(thread_id)
+        # disable_notification: same contract as the adapter's _notification_kwargs —
+        # silent in "important" mode unless the caller explicitly asked to buzz.
+        if notify is False or (notify is None and _standalone_notifications_mode() == "important"):
+            thread_kwargs = {**thread_kwargs, "disable_notification": True}
         # disable_web_page_preview is only valid for send_message, not media sends.
         text_kwargs = {**thread_kwargs, **({"disable_web_page_preview": True} if disable_link_previews else {})}
         last_msg, warnings, _tg_caption = None, [], None

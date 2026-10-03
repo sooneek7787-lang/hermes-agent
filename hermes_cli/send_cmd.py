@@ -228,6 +228,12 @@ def cmd_send(args: argparse.Namespace) -> None:
     if subject:
         message = f"{subject}\n\n{message.lstrip()}"
 
+    # Per-message notification override (#131924): --silent / --notify.
+    silent = getattr(args, "silent", False)
+    notify_flag = getattr(args, "notify", False)
+    if silent and notify_flag:
+        _fail("hermes send: --silent and --notify are mutually exclusive.", _USAGE_EXIT)
+
     # Lazy import keeps `hermes send --help` fast (no tool registry / gateway config stack).
     from tools.send_message_tool import send_message_tool
 
@@ -236,6 +242,8 @@ def cmd_send(args: argparse.Namespace) -> None:
     tool_args = {"action": "send", "target": target, "message": message}
     if mentions:
         tool_args["mentions"] = mentions
+    if silent or notify_flag:
+        tool_args["notify"] = notify_flag  # False (--silent) or True (--notify)
     result = send_message_tool(tool_args)
     sys.exit(_emit_result(result, json_mode=getattr(args, "json", False), quiet=getattr(args, "quiet", False)))
 
@@ -259,6 +267,12 @@ _SEND_ARGUMENTS = (
                             help="List available targets. Optional positional filter: `hermes send --list telegram`.")),
     (("-q", "--quiet"), dict(action="store_true", default=False, help="Suppress stdout on success (exit code only).")),
     (("--json",), dict(action="store_true", default=False, help="Emit raw JSON result instead of human-readable output.")),
+    (("--silent",), dict(action="store_true", default=False,
+                      help="Deliver without a notification buzz (Telegram: honours the "
+                           "notifications mode override; other platforms: informational).")),
+    (("--notify",), dict(action="store_true", default=False,
+                      help="Force a notification buzz even in 'important' mode (Telegram). "
+                           "Mutually exclusive with --silent.")),
 )
 
 
