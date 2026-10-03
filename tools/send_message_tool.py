@@ -271,9 +271,11 @@ def _handle_send(args):
         if mentions and platform_name == "whatsapp":
             handler_args["mentions"] = [mentions] if isinstance(mentions, str) else list(mentions)
         # ``notify`` is Telegram's per-message override for the notifications mode (#131924);
-        # other platforms' standalone senders ignore it, so scope it to Telegram.
+        # other platforms' standalone senders ignore it, so scope it to Telegram. Pass it only
+        # when set, so the call is unchanged (and existing exact-arg assertions hold) when the
+        # caller doesn't use it.
         notify = args.get("notify")
-        if platform_name == "telegram":
+        if platform_name == "telegram" and notify is not None:
             handler_args["notify"] = notify
         result = _run_async(_send_to_platform(platform, pconfig, chat_id, cleaned_message, thread_id=thread_id,
                                               media_files=media_files, force_document=force_document_attachments,
