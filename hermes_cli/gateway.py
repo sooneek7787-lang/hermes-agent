@@ -4541,22 +4541,45 @@ def _absorb_windows_console_controls() -> None:
 
 def _make_exit_diag():
     """``_exit_diag(tag, **extra)`` recorder writing ``logs/gateway-exit-diag.log`` — captures every way
-    ``asyncio.run()`` can return, for chasing silent Windows gateway deaths. HERMES_GATEWAY_EXIT_DIAG=0 opts out."""
+    ``asyncio.run()`` can return, for chasing silent Windows gateway deaths. HERMES_GATEWAY_EXIT_DIAG=0 opts out.
+
+    The recorder is a lazily-built rotating ``logging`` logger (2 MB × 2 backups, matching
+    ``errors.log``) so a crash loop can't grow the file without bound (#132222). The handler is
+    created once under a lock; the format is the same one JSON line per record."""
+    import threading
     from datetime import datetime as _dt, timezone as _tz
+
+    _diag_logger = logging.getLogger("hermes.gateway.exit_diag")
+    _diag_lock = threading.Lock()
+
+    def _ensure_diag_handler() -> None:
+        if _diag_logger.handlers:
+            return
+        from logging.handlers import RotatingFileHandler
+        from agent.redact import RedactingFormatter
+        from hermes_constants import get_hermes_home as _ghh
+        log_dir = _ghh() / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(
+            log_dir / "gateway-exit-diag.log",
+            maxBytes=2 * 1024 * 1024, backupCount=2, encoding="utf-8",
+        )
+        handler.setFormatter(RedactingFormatter("%(message)s"))
+        _diag_logger.setLevel(logging.INFO)
+        _diag_logger.propagate = False
+        _diag_logger.addHandler(handler)
 
     def _exit_diag(tag: str, **extra: object) -> None:
         if os.environ.get("HERMES_GATEWAY_EXIT_DIAG", "1") != "1":
             return
         try:
-            from hermes_constants import get_hermes_home as _ghh
-            log_dir = _ghh() / "logs"
-            log_dir.mkdir(parents=True, exist_ok=True)
+            with _diag_lock:
+                _ensure_diag_handler()
             line = {
                 "ts": _dt.now(_tz.utc).isoformat(), "tag": tag, "pid": os.getpid(),
                 "python": sys.version.split()[0], "platform": sys.platform, **extra,
             }
-            with open(log_dir / "gateway-exit-diag.log", "a", encoding="utf-8") as f:
-                f.write(json.dumps(line, default=str) + "\n")
+            _diag_logger.info(json.dumps(line, default=str))
         except Exception:
             pass  # never let the diagnostic itself crash the gateway
 
