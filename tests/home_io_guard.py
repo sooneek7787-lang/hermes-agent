@@ -31,6 +31,14 @@ _INTERPRETER_PREFIXES = tuple({
 _normcase = os.path.normcase
 _INTERPRETER_PREFIX_STRS = tuple(_normcase(os.fspath(p)) for p in _INTERPRETER_PREFIXES)
 
+# PM bootstrap (hermes_bootstrap.activate_dependencies) stats <checkout>/../manifest.json to
+# detect a sealed payload. On a default install the checkout lives INSIDE the hermes home, so
+# that stat is <home>/manifest.json — a no-op (the file is absent), but the guard would reject
+# it as home I/O. The guard file sits in <checkout>/tests/, so the home is parent.parent.parent.
+# Allow ONLY a metadata stat of this exact file (not reads/writes of it or the home root).
+_PM_BOOTSTRAP_MANIFEST_STR = _normcase(os.fspath(
+    Path(__file__).resolve().parent.parent.parent / "manifest.json"))
+
 
 def _within(path: str, prefix: str) -> bool:
     """``Path(path).is_relative_to(prefix)`` for two normalized, case-folded absolute strings."""
@@ -85,6 +93,11 @@ class HomeIOGuard:
             # Resolving the root itself (get_default_hermes_root's relative_to
             # probe) reads no state; only its contents are guarded.
             if metadata and absolute in roots:
+                return
+            # PM bootstrap's sealed-payload stat: <home>/manifest.json. A no-op stat of a
+            # non-existent file (the file is absent on a non-sealed install); the guard file
+            # sits in <checkout>/tests/, so the home is parent.parent.parent.
+            if metadata and absolute == _PM_BOOTSTRAP_MANIFEST_STR:
                 return
             # ``shutil.which`` stats/accesses ``<PATH entry>/<name>``. A developer shell puts
             # PM's tool store (~/.hermes/tools/...) on PATH; probing an executable there is
