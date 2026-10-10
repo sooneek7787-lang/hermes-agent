@@ -18,10 +18,13 @@
     "node-pty": "1.1.0",
     "plist": "3.1.1",
     "typescript": "6.0.3",
-    "vitest": "4.1.10"
+    "vitest": "^4.1.11"
   },
   "dependencies": {
     "@playwright/test": "1.62.1",
+    "electron": "40.10.6",
+    "electron-builder": "27.0.0-alpha.10",
+    "simple-git": "4.0.2",
     "zod": "4.4.3"
   }
 }
