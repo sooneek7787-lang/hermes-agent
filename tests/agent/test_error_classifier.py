@@ -508,6 +508,35 @@ class TestClassifyApiError:
         assert result.reason == FailoverReason.format_error
         assert result.retryable is False
 
+    def test_400_empty_body_local_llama_cpp_is_transient(self):
+        """An empty-bodied 400 from a local llama.cpp server is the dead pooled-socket
+        signature (PR #82809). Treat it as transient with free retries, not an abort."""
+        e = MockAPIError("Error code: 400", status_code=400)
+        result = classify_api_error(e, provider="local-llama")
+        assert result.reason == FailoverReason.llama_cpp_transient
+        assert result.retryable is True
+        assert result.should_fallback is False
+
+    def test_400_empty_body_cloud_provider_stays_format_error(self):
+        """Empty-bodied 400s on cloud providers keep the existing non-retryable
+        format_error classification — only local endpoints get the transient treatment."""
+        e = MockAPIError("Error code: 400", status_code=400)
+        result = classify_api_error(e, provider="openrouter")
+        assert result.reason == FailoverReason.format_error
+        assert result.retryable is False
+
+    def test_400_with_real_message_local_stays_format_error(self):
+        """A 400 that carries a real message (validation error, etc.) from a local server
+        is still a genuine client error — not swept up by the empty-bodied transient branch."""
+        e = MockAPIError(
+            "Bad request: invalid messages payload",
+            status_code=400,
+            body={"error": {"message": "Bad request: invalid messages payload", "type": "invalid_request_error"}},
+        )
+        result = classify_api_error(e, provider="local-llama")
+        assert result.reason == FailoverReason.format_error
+        assert result.retryable is False
+
     def test_message_only_overloaded_without_status_is_overloaded(self):
         """Some Anthropic-compatible proxies surface 'overloaded' in the
         message with no 503/529 status_code. It must classify as overloaded

@@ -64,6 +64,12 @@ class FailoverReason(enum.Enum):
     long_context_tier = "long_context_tier"    # Anthropic "extra usage" tier gate
     oauth_long_context_beta_forbidden = "oauth_long_context_beta_forbidden"  # Anthropic OAuth rejects 1M beta — disable beta and retry
     llama_cpp_grammar_pattern = "llama_cpp_grammar_pattern"  # llama.cpp grammar rejects regex `pattern`/`format` — strip from tools and retry
+    # Local llama.cpp closes the connection after every SSE reply; a pooled
+    # httpx client then lands the next request on the dead socket and gets
+    # an empty-bodied 400.  The request and server are fine — retry on a
+    # fresh connection (Hermes-only: curl and other harnesses open fresh
+    # sockets and never see it).
+    llama_cpp_transient = "llama_cpp_transient"
     unknown = "unknown"                  # Unclassifiable — retry with backoff
 
 
@@ -479,6 +485,11 @@ _ABORT_FALLBACK = {"retryable": False, "should_fallback": True}
 _R = FailoverReason
 
 _V_BILLING = _v(_R.billing, retryable=False, **_ROTATE_FALLBACK)
+# Local / self-hosted provider slugs whose empty-body 400 is the dead-pooled-socket signature
+# (PR #82809): the request is fine, only the connection was recycled by the server.
+_LOCAL_TRANSIENT_SLUGS = frozenset({
+    "custom", "local", "local-llama", "ollama", "lmstudio", "vllm", "koboldcpp", "openwebui",
+})
 _V_RATE_LIMIT = _v(_R.rate_limit, **_ROTATE_FALLBACK)
 _V_AUTH_ROTATE = _v(_R.auth, retryable=False, **_ROTATE_FALLBACK)
 _V_AUTH_FALLBACK = _v(_R.auth, **_ABORT_FALLBACK)
@@ -500,6 +511,9 @@ _V_REASONING_MANDATORY = _v(_R.reasoning_mandatory, should_compress=False, shoul
 # Same recovery hints as format_error: consumers without a merge-and-retry step (the main loop
 # already merges adjacent users before the call) keep aborting to the fallback chain.
 _V_ROLE_ALTERNATION = _v(_R.role_alternation, **_ABORT_FALLBACK)
+# Empty-body 400 from a local llama.cpp / OAI-compatible server: dead pooled socket after an
+# SSE reply (PR #82809). The request is fine — retry transiently on a fresh connection.
+_V_LLAMA_CPP_TRANSIENT = _v(_R.llama_cpp_transient, retryable=True, should_compress=False, should_fallback=False)
 # The MODEL emitted unparseable tool-call JSON and the proxy (Ollama, OpenRouter) rejected it: no
 # other provider can fix that output, so falling back only replays the same broken turn 4-5 times
 # (20-60s per occurrence, #12770). Abort this call; the loop's argument repair handles the retry.
@@ -1288,6 +1302,12 @@ def _classify_400(c: _Ctx) -> Verdict:
     # bare "Error"); proxy shapes are read so a descriptive rejection isn't "bare".
     body_msg = next((m for m in (str(x or "").strip().lower() for x in _body_message_candidates(c.body)) if m), "")
     is_generic = len(body_msg) < 30 or body_msg in {"error", ""}
+    # Empty-body 400 from a local llama.cpp / OAI-compatible server: dead pooled socket after an
+    # SSE reply (PR #82809). No body text at all is the signature — real validation errors
+    # (even short ones like "Request blocked.") always carry a message. Retry transiently
+    # on a fresh connection, not a client error.
+    if body_msg == "" and c.provider_slug in _LOCAL_TRANSIENT_SLUGS:
+        return _V_LLAMA_CPP_TRANSIENT
     if is_generic and c.large_session(0.4, 80000, 80):
         return _V_CONTEXT_OVERFLOW
     return _V_FORMAT_ERROR
