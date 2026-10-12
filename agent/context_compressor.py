@@ -1335,16 +1335,26 @@ def _last_assistant_index(messages: list[dict[str, Any]]) -> int:
 
 def _pending_tool_round(messages: list[dict[str, Any]]) -> range:
     """Indices of the tool results the transcript ends with — a round the model has not answered yet; empty when
-    the transcript ends in any other row. /steer rows after the round do not answer it: a steer is delivered
-    after the newest tool result before the next API call, and two can land in one iteration (one when the tool
-    batch ends, one before the request), so every contiguous trailing steer row is skipped."""
-    end = len(messages)
-    while end and messages[end - 1].get("display_kind") == STEER_DISPLAY_KIND:
-        end -= 1
-    start = end
+    an assistant row has answered it. Rows after the round that are not assistant do not answer it: /steer rows
+    land after the newest tool result before the next API call (two can land in one iteration — one when the tool
+    batch ends, one before the request), and a non-steer user row (e.g. a background-process completion notice)
+    likewise lands after the round before the next request. So the round stays pending as long as no assistant
+    row follows the trailing tool block; only an assistant row answers it (#137105)."""
+    n = len(messages)
+    last_tool_idx = None
+    for i in range(n - 1, -1, -1):
+        if messages[i].get("role") == "tool":
+            last_tool_idx = i
+            break
+    if last_tool_idx is None:
+        return range(0)
+    start = last_tool_idx
     while start > 0 and messages[start - 1].get("role") == "tool":
         start -= 1
-    return range(start, end)
+    for i in range(last_tool_idx + 1, n):
+        if messages[i].get("role") == "assistant":
+            return range(0)
+    return range(start, last_tool_idx + 1)
 
 
 def _part_text(item: Any) -> Optional[str]:
@@ -2007,6 +2017,17 @@ def _summarize_refused_tool_result(tool_name: str, args: dict, content: str) -> 
     return f"[{tool_name}]{target} {outcome}"[:_PRUNE_MIN_CHARS - 1]
 
 
+def _tool_output_line_count(tool_name: str, content: str) -> int:
+    """Line count of the tool's output text, not the JSON envelope (#137105): the envelope is one line
+    of JSON, so counting newlines in it always yields 1 and the terminal stub says "1 lines output".
+    For terminal/execute_code the output is the ``output`` field; else the raw content."""
+    if tool_name in ("terminal", "execute_code"):
+        output = _json_dict(content).get("output")
+        if isinstance(output, str):
+            return output.count("\n") + 1 if output.strip() else 0
+    return content.count("\n") + 1 if content.strip() else 0
+
+
 def _summarize_tool_result_unguarded(tool_name: str, tool_args: str, tool_content: str) -> str:
     """Build the summary line (unguarded; see ``_summarize_tool_result``)."""
     args = _json_dict(tool_args)
@@ -2014,7 +2035,7 @@ def _summarize_tool_result_unguarded(tool_name: str, tool_args: str, tool_conten
     if (refused := _summarize_refused_tool_result(tool_name, args, content)) is not None:
         return refused
     content_len = len(content)
-    line_count = content.count("\n") + 1 if content.strip() else 0
+    line_count = _tool_output_line_count(tool_name, content)
     summarizer = _TOOL_RESULT_SUMMARIZERS.get(tool_name)
     if summarizer is not None:
         return summarizer(tool_name, args, content, content_len, line_count)
