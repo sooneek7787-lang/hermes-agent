@@ -4166,10 +4166,18 @@ def _maybe_reap_dead_owners() -> None:
             logger.warning(
                 "Reclaimed %d cron execution(s) whose owner process died "
                 "before reaching a terminal state (marked unknown)",
-                _reclaimed)
+                _reclaimed
+            )
+        # Reap unknown executions that have finished (mark them as failed with reason 'owner exited')
+        from cron.executions import reap_unknown_executions
+        _reaped = reap_unknown_executions()
+        if _reaped:
+            logger.warning(
+                "Reaped %d cron execution(s) marked unknown as failed (owner exited)",
+                _reaped
+            )
     except Exception as _reap_exc:
         logger.debug("Dead-owner execution reclaim failed: %s", _reap_exc)
-
 
 def _sweep_stale_inflight_for_tick(due_jobs: list) -> None:
     """Bound the in-flight set BEFORE the dedup guard so a leaked claim is force-released now
