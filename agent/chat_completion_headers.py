@@ -7,6 +7,12 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _local_llama_create(create_fn, agent, **kwargs):
+    """Вызов chat.completions.create под локом, только для локального llama-server."""
+    from agent.chat_completion_helpers import _local_llama_create as _llc
+    return _llc(create_fn, agent, **kwargs)
+
+
 def _chat_completion_capturing_headers(agent, client, api_kwargs: dict):
     """Non-streaming ``chat.completions.create`` that also feeds the response headers to the
     rate-limit / credits capture, as ``_chat_stream_created`` does for streams.
@@ -23,11 +29,11 @@ def _chat_completion_capturing_headers(agent, client, api_kwargs: dict):
     # `is True`: a Mock agent's invented attribute is not a window plan.
     state = getattr(agent, "_credits_state", None)
     if getattr(agent, "provider", "") != "nous" or getattr(state, "is_usage_window", False) is not True:
-        return client.chat.completions.create(**api_kwargs)
+        return _local_llama_create(client.chat.completions.create, agent, **api_kwargs)
     raw_api = getattr(getattr(getattr(client, "chat", None), "completions", None), "with_raw_response", None)
     if raw_api is None:
-        return client.chat.completions.create(**api_kwargs)
-    raw = raw_api.create(**api_kwargs)
+        return _local_llama_create(client.chat.completions.create, agent, **api_kwargs)
+    raw = _local_llama_create(raw_api.create, agent, **api_kwargs)
     from agent.credits_tracker import response_is_usage_window
     if not response_is_usage_window(raw):
         return raw.parse()

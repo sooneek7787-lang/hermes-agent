@@ -42,6 +42,20 @@ from agent.gemini_native_adapter import is_native_gemini_base_url
 # boxes. Non-Ollama remotes (sglang, vLLM, OpenAI-compat) expose Ollama-compat endpoints that can
 # misidentify and, without an api_key, return 401 on every leg (issue #89863).
 from agent.model_metadata import is_local_endpoint
+
+# --- Ponytail: serialize all requests to the single -np 1 llama-server slot ---
+# 8 Hermes профиля → 1 слот KV-кэша на 192.168.25.1:8080. Лок на стороне Hermes
+# не даёт одновременно ворваться нескольким запросам в один слот.
+_LOCAL_LLAMA_LOCK = threading.Lock()
+
+
+def _local_llama_create(create_fn, agent, **kwargs):
+    """Вызов chat.completions.create под локом, только для локального llama-server."""
+    base = getattr(agent, "base_url", "") or ""
+    if is_local_endpoint(base):
+        with _LOCAL_LLAMA_LOCK:
+            return create_fn(**kwargs)
+    return create_fn(**kwargs)
 from agent.message_content import flatten_message_text
 from agent.message_metadata import PERSISTENCE_ONLY_MESSAGE_FIELDS, append_message, data_use_requirement, stamp_message_timestamp
 from agent.message_sanitization import (
@@ -784,7 +798,7 @@ def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
         _completions = getattr(getattr(agent.client, "chat", None), "completions", None)
         if not callable(getattr(_completions, "prepare", None)):
             api_kwargs.pop("_moa_prepared_request", None)
-        return agent.client.chat.completions.create(**api_kwargs)
+        return _local_llama_create(agent.client.chat.completions.create, agent, **api_kwargs)
     request_client = make_client("chat_completion_request")
     # #93650: keep the bulk wire-format payload out of the SDK's GIL-holding
     # request transform. No-op unless this really is the OpenAI SDK, so the
@@ -2952,7 +2966,7 @@ class _StreamingCall(StreamingWaitMonitor):
         # #93650: as above — the streaming path carries the same bulk
         # messages/tools payload and pays the same client-side walk.
         stream_kwargs = bypass_chat_sdk_request_transform(stream_kwargs, request_client)
-        return request_client.chat.completions.create(**stream_kwargs)
+        return _local_llama_create(request_client.chat.completions.create, self.agent, **stream_kwargs)
 
     def _chat_stream_created(self, raw_stream: Any) -> None:
         response = self._attempt_stream_response = getattr(raw_stream, "response", None)
@@ -3999,3 +4013,50 @@ __all__ = [
     "interruptible_streaming_api_call",
     "try_activate_fallback",
 ]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ponytail self-check: _local_llama_create serializes only to local endpoints
+# ══════════════════════════════════════════════════════════════════════════════
+if __name__ == "__main__":
+    import threading
+
+    calls = []
+
+    def fake_create(**kwargs):
+        calls.append(threading.get_ident())
+        return "ok"
+
+    class FakeAgent:
+        base_url = "http://192.168.25.1:8080/v1"  # local endpoint
+
+    class RemoteAgent:
+        base_url = "https://api.openai.com/v1"  # not local
+
+    # 1. Local endpoint → lock acquired, same thread inside lock
+    t1 = threading.Thread(
+        target=lambda: _local_llama_create(fake_create, FakeAgent(), model="x")
+    )
+    t2 = threading.Thread(
+        target=lambda: _local_llama_create(fake_create, FakeAgent(), model="y")
+    )
+    t1.start(); t2.start(); t1.join(); t2.join()
+    assert len(calls) == 2, f"expected 2 calls, got {len(calls)}"
+    # Both calls went through the lock → serialized (one at a time)
+    print("local-endpoint lock: OK (serialized,", len(calls), "calls)")
+
+    # 2. Remote endpoint → no lock, direct call
+    calls.clear()
+    r = _local_llama_create(fake_create, RemoteAgent(), model="z")
+    assert r == "ok" and len(calls) == 1
+    print("remote-endpoint passthrough: OK")
+
+    # 3. Empty base_url → passthrough (is_local_endpoint("") is False)
+    class NoBaseAgent:
+        base_url = ""
+    calls.clear()
+    _local_llama_create(fake_create, NoBaseAgent(), model="w")
+    assert len(calls) == 1
+    print("empty-base-url passthrough: OK")
+
+    print("ALL SELF-CHECKS PASSED")
