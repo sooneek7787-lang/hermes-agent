@@ -1609,6 +1609,30 @@ class _CronJobConfig:
     cron_default_provider: str
 
 
+def _discover_llama_models(base_url: str) -> list[str]:
+    """Query /v1/models on a local llama.cpp server; return available model ids (empty on failure)."""
+    if not base_url:
+        return []
+    try:
+        import requests
+        url = base_url.rstrip("/") + "/models"
+        resp = requests.get(url, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        return [m.get("id", "") for m in data.get("data", []) if m.get("id")]
+    except Exception:
+        return []
+
+
+def _prefer_chat_model(available: list[str]) -> str:
+    """Pick the chat model from a /v1/models list (skip embedding/reranker). Falls back to first."""
+    for m in available:
+        low = m.lower()
+        if "embed" not in low and "rerank" not in low:
+            return m
+    return available[0] if available else ""
+
+
 def _load_cron_job_config(job: dict, job_id: str, job_name: str) -> _CronJobConfig:
     """Load config.yaml and resolve the run's model: per-job pin > cron.model (fleet default) >
     the main agent model (config ``model:``, then HERMES_MODEL) > the claimed welcome trial's. Re-read
@@ -1654,6 +1678,21 @@ def _load_cron_job_config(job: dict, job_id: str, job_name: str) -> _CronJobConf
             f"`hermes cron edit {job_id} --model <name>` or set a "
             "default with `hermes model <name>`."
         )
+    # #20125: llama.cpp model swap — an unpinned job resolves the configured model, but if the
+    # local server is running a different model (crash/swap, very common with local inference) the
+    # request fails with an opaque connection error. Discover what's actually loaded and fall back.
+    if not job.get("model") and isinstance(_model_cfg, dict):
+        _prov = str(_model_cfg.get("provider") or "").strip()
+        _base = str(_model_cfg.get("base_url") or "").strip()
+        if _base and _prov in ("local-llama", "llama", "llama_cpp", "custom"):
+            _available = _discover_llama_models(_base)
+            if _available and model not in _available:
+                _fallback = _prefer_chat_model(_available)
+                logger.warning(
+                    "Job '%s': configured model %r not loaded on %s (loaded: %s); "
+                    "falling back to %r (#20125)",
+                    job_name, model, _base, _available, _fallback)
+                model = _fallback
 
     with contextlib.suppress(Exception):
         from hermes_constants import apply_ipv4_preference
