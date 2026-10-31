@@ -194,7 +194,10 @@ class WorkerRPC:
                     self._drop()
                     link = self._connection()
                     link.send(request_id, message)
-                response = link.receive(20)
+                # #145022: 20 s was shorter than the gateway's stall under concurrent kanban
+                # workers (SQLite conn.execute blocks the async loop); the worker gave up its
+                # session save and exited, leaving the execution unknown. 60 s survives the stall.
+                response = link.receive(60)
             except BaseException:
                 # Outcome unknown once sent: surface the error and never resend; the next call redials.
                 self._drop()
