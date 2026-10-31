@@ -234,9 +234,19 @@ def _protected_instruction_reason(filepath: str, task_id: str = "default",
     # Must run before the ``.hermes`` component rule, which would match the home.
     # ``_hermes_exempt_homes`` also covers the ROOT when the active home is a named
     # profile, so ~/.hermes/<file> cannot read as project-local ``.hermes`` config.
+    # Protected instruction files (SOUL.md/AGENTS.md/CLAUDE.md) inside ~/.hermes are
+    # NOT exempt: those "own guards" don't cover them, so without this a rewrite of
+    # the policy layer goes ungated (#146965).
     for real_home in _hermes_exempt_homes():
         if resolved == real_home or resolved.startswith(real_home + os.sep):
-            return None
+            _protected_inside_hermes = any(
+                os.path.basename(candidate).lower() in _PROTECTED_INSTRUCTION_BASENAMES
+                or any(fnmatch.fnmatch(os.path.basename(candidate).lower(), pattern.lower())
+                       for pattern in extra_patterns)
+                for candidate in (normalized, resolved))
+            if not _protected_inside_hermes:
+                return None
+            break
 
     for candidate in (normalized, resolved):
         base = os.path.basename(candidate)
