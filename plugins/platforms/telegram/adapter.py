@@ -2469,7 +2469,10 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
         # Snapshot whether WE transition to fatal: a concurrent retry task suspended past the entry
         # guard reaches this branch too. Only the first transition notifies.
         _already_fatal = self.has_fatal_error and self.fatal_error_code == "telegram_polling_conflict"
-        self._set_fatal_error("telegram_polling_conflict", message, retryable=False)
+        # retryable=True: in a multiplexed gateway a polling conflict is usually the gateway's own
+        # previous session (Telegram expires it). Letting the reconnect path take it keeps the
+        # profile alive instead of a healthy-looking gateway with a silently-down profile (#146909).
+        self._set_fatal_error("telegram_polling_conflict", message, retryable=True)
         try:
             if self._app and self._app.updater:
                 await _await_with_thread_deadline(self._app.updater.stop(), timeout=_UPDATER_STOP_TIMEOUT)
