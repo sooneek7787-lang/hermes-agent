@@ -3431,6 +3431,18 @@ def request_changes(
         if expected_run_id is not None and int(current_run_id) != int(expected_run_id):
             return False, "run_id mismatch"
 
+        # Review round limit: reject after N changes_requested rounds so the
+        # reviewer must complete_task or block_task (escalation) instead of looping.
+        rounds = conn.execute(
+            "SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = 'changes_requested'",
+            (task_id,),
+        ).fetchone()[0]
+        if rounds >= _env_int("HERMES_KANBAN_MAX_REVIEW_ROUNDS", 3, minimum=1):
+            return False, (
+                f"review round limit ({rounds}) reached — reviewer must complete_task "
+                f"or block_task (escalation) instead of another changes_requested"
+            )
+
         claimed_event = _latest_event(conn, task_id, "claimed", current_run_id)
         claimed_payload = _json_dict(_row_get(claimed_event, "payload"))
         if claimed_payload.get("source_status") != "review":

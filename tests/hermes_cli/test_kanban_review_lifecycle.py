@@ -928,3 +928,38 @@ def test_synthesized_run_for_unassigned_card_keeps_null_profile(kanban_home: Pat
             "SELECT profile, outcome FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1", (tid,),
         ).fetchone()
         assert (run["outcome"], run["profile"]) == ("blocked", None)
+
+
+def test_request_changes_round_limit_forces_decision(kanban_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """After N ``changes_requested`` rounds the reviewer must decide
+    (``complete_task``/``block_task``) instead of looping the implementer."""
+    monkeypatch.setenv("HERMES_KANBAN_MAX_REVIEW_ROUNDS", "2")
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="loop", assignee="builder")
+        # Two allowed rounds: implementer -> review -> changes_requested.
+        for i in range(2):
+            claimed = kb.claim_task(conn, tid)
+            assert claimed is not None
+            assert kb.request_review(
+                conn, tid, summary=f"v{i + 1}", reviewer="reviewer",
+                expected_run_id=claimed.current_run_id,
+            )
+            review = kb.claim_review_task(conn, tid)
+            assert review is not None
+            assert kb.request_changes(
+                conn, tid, reason="fix", expected_run_id=review.current_run_id,
+            ) == (True, "builder")
+        # Third round is rejected: the reviewer must decide.
+        claimed = kb.claim_task(conn, tid)
+        assert claimed is not None
+        assert kb.request_review(
+            conn, tid, summary="v3", reviewer="reviewer",
+            expected_run_id=claimed.current_run_id,
+        )
+        review = kb.claim_review_task(conn, tid)
+        assert review is not None
+        ok, reason = kb.request_changes(
+            conn, tid, reason="again", expected_run_id=review.current_run_id,
+        )
+        assert ok is False
+        assert "round limit" in (reason or "")
