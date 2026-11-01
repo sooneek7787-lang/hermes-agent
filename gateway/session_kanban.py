@@ -11,6 +11,19 @@ import sqlite3
 from hermes_state_runtime import RuntimeStoreError
 
 
+# ECC role → specialist skills (github.com/affaan-m/ecc, MIT). Every worker auto-loads its
+# role's ECC agent, mirroring the review-lane rule below (sdlc-review). One per role: no bloat.
+_ECC_ROLE_SKILLS = {
+    'coder':      ['build-error-resolver'],
+    'backend':    ['security-reviewer'],
+    'frontend':   ['performance-optimizer'],
+    'devops':     ['harness-optimizer'],
+    'researcher': ['planner'],
+    'auditor':    ['silent-failure-hunter'],
+    'worker':     ['loop-operator'],
+}
+
+
 def build_kanban_policy(connection, params, config):
     from hermes_cli import kanban_db as kb
     from hermes_cli.profiles import resolve_profile_env
@@ -43,6 +56,8 @@ def build_kanban_policy(connection, params, config):
                 raise RuntimeStoreError('stale_kanban_claim')
             context = kb.build_worker_context(conn, task.id)
             skills = list(task.skills or ())
+            # Role's ECC specialist agent (mirrors the review-lane rule below).
+            skills = list(dict.fromkeys([*skills, *_ECC_ROLE_SKILLS.get(task.assignee or '', ())]))
             if kb._retry_status_for_run(conn, task.id, task.current_run_id) == 'review':
                 # Same rule as the dispatcher's review lane: the reviewer always loads sdlc-review.
                 skills = list(dict.fromkeys([*skills, 'sdlc-review']))
