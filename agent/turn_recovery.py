@@ -664,6 +664,23 @@ def recover_after_classification(
     Returns ``(retry_now, recovered_with_pool)``; the latter feeds the Nous rate-limit guard."""
     from agent.conversation_loop import _is_nous_inference_route
 
+    # Empty-body 400 from a local llama.cpp (PR #82809): the failed attempt's stream cleanup
+    # already closed the dead pooled socket, so the next attempt opens a fresh connection.
+    # Free budget — not charged against the normal retry count.
+    if (
+        classified.reason == FailoverReason.llama_cpp_transient
+        and _retry.llama_cpp_transient_retries < 10
+    ):
+        _retry.llama_cpp_transient_retries += 1
+        _free_n = _retry.llama_cpp_transient_retries
+        _vlines(agent, f"llama.cpp transient 400 (free retry {_free_n}/10) — sleeping 1.5s")
+        logger.warning(
+            "%sllama.cpp transient 400 (free retry %d/10) — recycling dead pooled connection",
+            agent.log_prefix, _free_n,
+        )
+        time.sleep(1.5)
+        return True, False
+
     # The credit-limited 402 clamp runs before pool rotation, which would bench a credential
     # that still has credit. A ``reasoning.context`` 400 is classified reasoning_mandatory, whose rung
     # would drop the whole reasoning config; omit only the all_turns opt-in, ahead of it.

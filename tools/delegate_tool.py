@@ -200,6 +200,14 @@ def _apply_child_compression_cap(child, delegation_cfg: dict) -> None:
         cc._apply_threshold_tokens_cap()
 
 
+def _apply_delegation_temperature(delegation_cfg: dict, request_overrides: dict) -> dict:
+    """Pin child sampling temperature from ``delegation.temperature`` (caller key wins)."""
+    temp = delegation_cfg.get("temperature")
+    if temp is not None and "temperature" not in request_overrides:
+        request_overrides["temperature"] = temp
+    return request_overrides
+
+
 def _build_child_agent(
     task_index: int,
     goal: str,
@@ -286,6 +294,7 @@ def _build_child_agent(
             request_overrides = dict(override_request_overrides)
         else:
             request_overrides = {} if override_provider else dict(getattr(parent_agent, "request_overrides", {}) or {})
+        request_overrides = _apply_delegation_temperature(delegation_cfg, request_overrides)
         parent_sid = getattr(parent_agent, "session_id", None)
         child_session_db = _open_child_session_db(parent_agent)
         with delegated_child_context():

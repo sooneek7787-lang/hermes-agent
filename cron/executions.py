@@ -753,3 +753,20 @@ def latest_executions(job_ids: list[str]) -> dict[str, dict[str, Any]]:
             clean,
         ).fetchall()
     return {row["job_id"]: dict(row) for row in rows}
+
+
+def reap_unknown_executions() -> int:
+    """Mark unknown executions that have finished as failed with reason 'owner exited'.
+
+    Returns the number of rows updated.
+    """
+    with _transaction() as conn:
+        sql = """
+            UPDATE executions
+            SET status = 'failed',
+                error = 'owner exited'
+        WHERE status = 'unknown'
+          AND finished_at IS NOT NULL
+        """
+        cur = conn.execute(sql)
+        return cur.rowcount

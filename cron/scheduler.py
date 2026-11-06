@@ -36,6 +36,14 @@ from typing import Any, Callable, Dict, List, Optional, Union
 # `hermes update`) otherwise fail with ModuleNotFoundError for hermes_time et al.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# `-m cron.scheduler` runs this file as __main__ without registering it as
+# ``cron.scheduler`` in sys.modules, so the split modules' late-bound
+# ``from cron import scheduler as _sched`` (bottom of this file) would import a
+# second, independent copy with its own classes and module state. Alias the
+# running module before any sibling import can re-enter it (#132732).
+if __name__ == "__main__":
+    sys.modules.setdefault("cron.scheduler", sys.modules[__name__])
+
 from cron.worker_bootstrap import WORKER_MARKER, finish_worker_boot
 from hermes_constants import get_hermes_home, hermes_home_key
 from hermes_cli.observability.shared_metrics_gateway import note_cron_execution, note_cron_skipped
@@ -1601,6 +1609,30 @@ class _CronJobConfig:
     cron_default_provider: str
 
 
+def _discover_llama_models(base_url: str) -> list[str]:
+    """Query /v1/models on a local llama.cpp server; return available model ids (empty on failure)."""
+    if not base_url:
+        return []
+    try:
+        import requests
+        url = base_url.rstrip("/") + "/models"
+        resp = requests.get(url, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        return [m.get("id", "") for m in data.get("data", []) if m.get("id")]
+    except Exception:
+        return []
+
+
+def _prefer_chat_model(available: list[str]) -> str:
+    """Pick the chat model from a /v1/models list (skip embedding/reranker). Falls back to first."""
+    for m in available:
+        low = m.lower()
+        if "embed" not in low and "rerank" not in low:
+            return m
+    return available[0] if available else ""
+
+
 def _load_cron_job_config(job: dict, job_id: str, job_name: str) -> _CronJobConfig:
     """Load config.yaml and resolve the run's model: per-job pin > cron.model (fleet default) >
     the main agent model (config ``model:``, then HERMES_MODEL) > the claimed welcome trial's. Re-read
@@ -1646,6 +1678,21 @@ def _load_cron_job_config(job: dict, job_id: str, job_name: str) -> _CronJobConf
             f"`hermes cron edit {job_id} --model <name>` or set a "
             "default with `hermes model <name>`."
         )
+    # #20125: llama.cpp model swap — an unpinned job resolves the configured model, but if the
+    # local server is running a different model (crash/swap, very common with local inference) the
+    # request fails with an opaque connection error. Discover what's actually loaded and fall back.
+    if not job.get("model") and isinstance(_model_cfg, dict):
+        _prov = str(_model_cfg.get("provider") or "").strip()
+        _base = str(_model_cfg.get("base_url") or "").strip()
+        if _base and _prov in ("local-llama", "llama", "llama_cpp", "custom"):
+            _available = _discover_llama_models(_base)
+            if _available and model not in _available:
+                _fallback = _prefer_chat_model(_available)
+                logger.warning(
+                    "Job '%s': configured model %r not loaded on %s (loaded: %s); "
+                    "falling back to %r (#20125)",
+                    job_name, model, _base, _available, _fallback)
+                model = _fallback
 
     with contextlib.suppress(Exception):
         from hermes_constants import apply_ipv4_preference
@@ -2507,7 +2554,7 @@ def _construct_cron_agent(AIAgent, job: dict, _cfg: dict, setup: _CronAgentSetup
         # Project context files only with a configured workdir; SOUL.md always.
         skip_context_files=not bool(workdir),
         load_soul_identity=True,
-        skip_memory=False,
+        skip_memory=True,
         skip_background_review=True,  # Cron has no human-in-the-loop need for skill/memory review forks (~30K tok/event)
         platform="cron",
         session_id=session_id,
@@ -4166,10 +4213,18 @@ def _maybe_reap_dead_owners() -> None:
             logger.warning(
                 "Reclaimed %d cron execution(s) whose owner process died "
                 "before reaching a terminal state (marked unknown)",
-                _reclaimed)
+                _reclaimed
+            )
+        # Reap unknown executions that have finished (mark them as failed with reason 'owner exited')
+        from cron.executions import reap_unknown_executions
+        _reaped = reap_unknown_executions()
+        if _reaped:
+            logger.warning(
+                "Reaped %d cron execution(s) marked unknown as failed (owner exited)",
+                _reaped
+            )
     except Exception as _reap_exc:
         logger.debug("Dead-owner execution reclaim failed: %s", _reap_exc)
-
 
 def _sweep_stale_inflight_for_tick(due_jobs: list) -> None:
     """Bound the in-flight set BEFORE the dedup guard so a leaked claim is force-released now

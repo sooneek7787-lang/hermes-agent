@@ -42,6 +42,10 @@ class TurnRetryState:
     # Transport / rate-limit recovery
     primary_recovery_attempted: bool = False
     has_retried_429: bool = False
+    # Free-retry budget for local llama.cpp "transient 400" (dead pooled socket after an
+    # SSE reply). Not charged against the normal api_max_retries budget: the request itself
+    # is fine, only the connection was recycled by the server (PR #82809).
+    llama_cpp_transient_retries: int = 0
     # Credit-limited 402 ("can only afford N tokens") already retried with a lowered output cap.
     affordable_402_clamp_attempted: bool = False
     # Persistent 401/403 already escalated to the fallback chain once this attempt.

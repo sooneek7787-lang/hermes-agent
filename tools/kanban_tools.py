@@ -576,6 +576,9 @@ def heartbeat_current_worker_from_env() -> bool:
     try:
         from hermes_cli import kanban_db_dispatch as kbd
         with _board(None, quiet_close=True) as (kb, conn):
+            # #145886: a busy board must not wedge the stream watchdog — the default 120 s x 6
+            # retries here blocked the monitor loop for ~720 s. A missed heartbeat is harmless.
+            conn.execute("PRAGMA busy_timeout=2000")
             ops = ((kb.heartbeat_claim, {"claimer": os.environ.get("HERMES_KANBAN_CLAIM_LOCK")}),
                    (kbd.heartbeat_worker, {"note": None, "expected_run_id": _worker_run_id(tid)}))
             succeeded = True

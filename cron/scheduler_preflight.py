@@ -346,6 +346,24 @@ def _preflight_check_skills(job: dict) -> Optional[str]:
     return None
 
 
+def _preflight_check_cron_constants(job: dict) -> Optional[str]:
+    """Ensure critical cron constants are importable to prevent import cascades.
+    Specifically checks that `is_recurring` can be imported from cron.constants,
+    as its absence can cause multiple jobs to fail simultaneously."""
+    try:
+        from cron.constants import is_recurring
+        # Just verify we can access it - don't need to use it
+        _ = is_recurring
+    except Exception as e:
+        logger.debug("Cron constants preflight check failed", exc_info=True)
+        return (
+            f"Cron constants import failed: {type(e).__name__}: {e}. "
+            "This can cause an import cascade affecting multiple jobs. "
+            "Check cron/constants.py for syntax errors or missing dependencies."
+        )
+    return None
+
+
 # (job id, server name) pairs already warned about as reconnecting; see _empty_requested_mcp_toolsets.
 _RECONNECTING_WARNED: set = set()
 
@@ -411,6 +429,7 @@ def _preflight_job_config(job: dict, cfg: dict) -> Optional[str]:
     for name, check in (
         ("provider_key", lambda: _preflight_check_provider_key(job, cfg)),
         ("skills", lambda: _preflight_check_skills(job)),
+        ("cron_constants", lambda: _preflight_check_cron_constants(job)),
         ("delivery", lambda: _preflight_check_delivery(job))):
         try:
             reason = check()

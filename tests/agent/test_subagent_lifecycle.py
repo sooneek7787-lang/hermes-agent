@@ -356,3 +356,18 @@ def test_provider_is_plugin_facing_only():
     props = DELEGATE_TASK_SCHEMA["parameters"]["properties"]
     exposed = set(props) | set(props["tasks"]["items"]["properties"])
     assert not exposed & {"provider", "model", "base_url", "api_key"}
+
+
+def test_apply_delegation_temperature_pins_config_value():
+    """``delegation.temperature`` is pinned onto the child's request_overrides;
+    a caller-supplied temperature wins (no double-set)."""
+    from tools.delegate_tool import _apply_delegation_temperature
+
+    # Config value pinned onto empty overrides.
+    assert _apply_delegation_temperature({"temperature": 0.2}, {}) == {"temperature": 0.2}
+    # No config value -> overrides untouched.
+    assert _apply_delegation_temperature({}, {}) == {}
+    # Caller key wins: config does not override an explicit temperature.
+    assert _apply_delegation_temperature({"temperature": 0.2}, {"temperature": 0.9}) == {"temperature": 0.9}
+    # Other keys preserved.
+    assert _apply_delegation_temperature({"temperature": 0.2}, {"top_p": 0.5}) == {"top_p": 0.5, "temperature": 0.2}

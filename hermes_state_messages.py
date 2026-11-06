@@ -865,6 +865,9 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
         carried_ids = self._resolve_carried_row_ids(conn, session_id, carried_messages or [])
         covered_set.update(carried_ids)
         unseen = [row_id for row_id in active_ids if row_id not in covered_set]
+        # Exclude Detailed Session Log rows from being cloned as unseen
+        dsl_ids = self._detailed_session_log_ids(conn, session_id)
+        unseen = [row_id for row_id in unseen if row_id not in dsl_ids]
         covered_active = [row_id for row_id in active_ids if row_id in covered_set]
         # An unseen row the compacted set already carries is superseded by that copy, not cloned (#137197).
         carried_unseen, weak_claims = self._carried_tail_ids(conn, unseen, compacted_messages)
@@ -989,6 +992,9 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
         tail_ids: list[int] = [] if watermark is None else [int(row["id"]) for row in conn.execute(
             "SELECT id FROM messages WHERE session_id = ? AND active = 1 AND id > ? ORDER BY id",
             (session_id, int(watermark))).fetchall()]
+        # Filter out Detailed Session Log rows from the tail
+        tail_dsl_ids = self._detailed_session_log_ids(conn, session_id)
+        tail_ids = [tid for tid in tail_ids if tid not in tail_dsl_ids]
         # A concurrent-tail row the compacted set already carries is superseded by that copy, not
         # cloned beside it (#137197); its carried dict then has no original below the watermark.
         carried_tail, weak_claims = self._carried_tail_ids(conn, tail_ids, compacted_messages)
@@ -1039,6 +1045,15 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
         if not getattr(self, "_message_columns_cache", None):
             self._message_columns_cache = [r[1] for r in conn.execute("PRAGMA table_info(messages)").fetchall()]
         return self._message_columns_cache
+
+    def _detailed_session_log_ids(self, conn, session_id: str) -> set[int]:
+        """Return the set of message IDs that contain the Detailed Session Log heading."""
+        from agent.context_compressor import _LEAN_SESSION_LOG_HEADING
+        rows = conn.execute(
+            "SELECT id FROM messages WHERE session_id = ? AND content LIKE ?",
+            (session_id, f"{_LEAN_SESSION_LOG_HEADING}%")
+        ).fetchall()
+        return {int(row["id"]) for row in rows}
 
     def set_user_message_content(self, session_id: str, row_id: int, content: Any,
                                  display_metadata: Optional[dict[str, Any]] = None) -> int:

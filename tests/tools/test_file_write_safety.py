@@ -976,8 +976,14 @@ class TestProfileHomeExemptsHermesRoot:
         token = set_hermes_home_override(str(profile))
         try:
             assert os.path.realpath(str(root)) in ft._hermes_exempt_homes()
-            for name in ("LEDGER.md", "MEMORY.md", "SOUL.md", "AGENTS.md"):
+            # Non-protected basenames are exempt from the ``.hermes`` component rule.
+            for name in ("LEDGER.md", "MEMORY.md"):
                 assert ft._protected_instruction_reason(str(root / name)) is None, name
+            # Protected instruction files (SOUL.md/AGENTS.md) at the hermes root ARE
+            # gated: the "own guards" (config hard-block / mirror / write_approval)
+            # don't cover them, so a rewrite of the policy layer is gated (#146965).
+            for name in ("SOUL.md", "AGENTS.md"):
+                assert ft._protected_instruction_reason(str(root / name)) is not None, name
             res = self._write(root / "LEDGER.md", "caliber fixed")
         finally:
             reset_hermes_home_override(token)
